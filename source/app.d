@@ -27,7 +27,7 @@ extern(System) VkBool32 VkDebug_Report_Callback(
   void*                      pUserData ) nothrow @nogc
 {
   printf("ObjectType: %i\n", object_type);
-  printf("%c\n", pMessage);
+  printf(pMessage);
   return VK_FALSE;
 }
 
@@ -94,9 +94,9 @@ VkPhysicalDeviceProperties RPhysical_Device_Properties ( VkPhysicalDevice d ) {
   Parameter: A physical device
   Return: device features of the physical device
 **/
-VkPhysicalDeviceFeatures RPhysical_Device_Features ( VkPhysicalDevice d ) {
-  VkPhysicalDeviceFeatures device_features;
-  vkGetPhysicalDeviceFeatures(d, &device_features);
+VkPhysicalDeviceFeatures* RPhysical_Device_Features ( VkPhysicalDevice d ) {
+  VkPhysicalDeviceFeatures* device_features = new VkPhysicalDeviceFeatures();
+  vkGetPhysicalDeviceFeatures(d, device_features);
   return device_features;
 }
 
@@ -107,7 +107,11 @@ struct QueueFamilyIndices {
   bool Set_Family ( QueueFamily family, uint index, VkPhysicalDevice device,
                     VkSurfaceKHR surface ) {
     VkBool32 present;
+    writeln("device: ", device);
+    writeln(index, " ", surface);
+    writeln("func: ", vkGetPhysicalDeviceSurfaceSupportKHR);
     vkGetPhysicalDeviceSurfaceSupportKHR(device, index, surface, &present);
+    writeln("hm");
     if ( present )
       families[cast(uint)family] = index;
     return cast(bool)present;
@@ -134,7 +138,7 @@ struct VkContext {
 
   QueueFamilyIndices queue_family_indices;
 
-  VkQueue present_queue;
+  VkQueue graphics_queue;
   uint width = -1, height = -1;
   VkSwapchainKHR swapchain;
   VkCommandBuffer setup_cmd_buffer, draw_cmd_buffer;
@@ -244,16 +248,23 @@ private:
             sdl_context.window_info.info.x11.window);
     enforceVK(vkCreateXlibSurfaceKHR(vk_ctx.instance, xlib_info, null,
                                      &vk_ctx.surface));
+    writeln("CREATED SURFACE: ", vk_ctx.surface);
   }
 
   QueueFamilyIndices RQueue_Families ( VkPhysicalDevice device ) {
     QueueFamilyIndices indices;
     auto queue_family = RPhysical_Device_Queue_Family(device);
+    writeln(queue_family);
     // Find VK_QUEUE_GRAPHICS_BIT and check for support on device&surface
     foreach ( iter, queue; queue_family ) {
+      iter.writeln;
+      queue.queueCount.writeln;
+      queue.queueFlags.writeln;
       if ( queue.queueCount > 0 && queue.queueFlags&VK_QUEUE_GRAPHICS_BIT ) {
+        writeln("set family..");
         bool success = indices.Set_Family(QueueFamily.Graphics, iter, device,
                                           vk_ctx.surface);
+        success.writeln;
         if ( success ) break;
       }
     }
@@ -268,19 +279,24 @@ private:
     // Get family properties of the GPU
     auto device_properties = RPhysical_Device_Properties(device);
     // Check for a discrete GPU
-    if ( device_properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU )
-      return QueueFamilyIndices();// default values -1
+    writeln(device_properties.deviceType);
     return RQueue_Families(device);
+    // if ( device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ||
+         // device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
+      // return RQueue_Families(device);
+    // return QueueFamilyIndices();// default values -1
   }
 
   void Setup_Vk_Physical_Device ( ) {
     auto devices = RPhysical_Devices(vk_ctx.instance);
-    const(char*)[] device_extensions = ["VK_KHR_swapchain"];
     foreach ( index, device; devices ) {
       auto indices = Is_Device_Suitable(device);
+      writeln("is complete?");
       if ( indices.Is_Complete() ) {
+        writeln("yes");
         vk_ctx.physical_device = device;
         vk_ctx.queue_family_indices = indices;
+        writeln("IDX: ", indices.RFamily(QueueFamily.Graphics));
         break;
       }
     }
@@ -288,26 +304,33 @@ private:
   }
 
   void Setup_Vk_Logical_Device ( ) {
+    // get queue index
+    auto gfx_idx = vk_ctx.queue_family_indices.RFamily(QueueFamily.Graphics);
     // Create device queue info
     VkDeviceQueueCreateInfo* queue_create_info = new VkDeviceQueueCreateInfo();
     queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queue_create_info.queueFamilyIndex = vk_ctx.queue_family_indices
-                                         .RFamily(QueueFamily.Graphics);
+    writeln("IDX: ", gfx_idx);
+    queue_create_info.queueFamilyIndex = gfx_idx;
     queue_create_info.queueCount = 1;
-    queue_create_info.pQueuePriorities = 1.0f; // max priority
+    float* priority = new float(1.0f);
+    queue_create_info.pQueuePriorities = priority; // max priority
     // Get device features
-    VkPhysicalDeviceFeatures* device_features;
-    device_features = new VkPhysicalDeviceFeatures(
-                          RPhysical_Device_Features(vk_ctx.physical_device));
+    static const(char*)[] device_extensions = ["VK_KHR_swapchain"];
     // Get device create info
-    vkDeviceCreateInfo* create_info = new vkDeviceCreateInfo;
+    VkPhysicalDeviceFeatures* features = new VkPhysicalDeviceFeatures();
+    features.shaderClipDistance = VK_TRUE;
+    VkDeviceCreateInfo* create_info = new VkDeviceCreateInfo;
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     create_info.pQueueCreateInfos = queue_create_info;
     create_info.queueCreateInfoCount = 1;
-    create_info.pEnabledFeatures = device_features;
+    create_info.pEnabledFeatures = features;
     // layers
     create_info.enabledLayerCount = 1;
-    create_info.ppEnabledLayerNames = RVulkan_Layers();
+    create_info.ppEnabledLayerNames = device_extensions.ptr;
+    // create device
+    enforceVK(vkCreateDevice(vk_ctx.physical_device, create_info, null,
+                             &vk_ctx.logical_device));
+    // vkGetDeviceQueue(vk_ctx.logical_device, gfx_idx, 0, &vk_ctx.graphics_queue);
   }
 
   void Initialize_Vulkan ( ){
@@ -346,6 +369,7 @@ private:
     vkDestroyDebugReportCallbackEXT(vk_ctx.instance,
                                     vk_ctx.debug_callback, null);
     // VkPhysicalDevice is destroyed implicitly with VkInstance
+    vkDestroyDevice(vk_ctx.logical_device, null);
     vkDestroyInstance(vk_ctx.instance, null);
     writeln("Cleanup finished");
   }
