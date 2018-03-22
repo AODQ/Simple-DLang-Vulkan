@@ -1,8 +1,7 @@
 {
 	"fileVersion": 1,
 	"versions": {
-		"derelict-glfw3": "4.0.0-beta.1",
-		"derelict-sdl2": "2.1.4",
+		"derelict-sdl2": "2.0.2",
 		"derelict-util": "2.0.6",
 		"erupted": "1.7.0",
 		"gfm": "7.0.0",
