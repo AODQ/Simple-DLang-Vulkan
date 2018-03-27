@@ -295,8 +295,9 @@ struct VkContext {
   VkSemaphore image_available_semaphore, render_finished_semaphore;
 
   VkBuffer vertex_buffer, index_buffer, uniform_buffer;
+  VkImage texture_image;
   VkDeviceMemory vertex_buffer_memory, index_buffer_memory,
-                 uniform_buffer_memory;
+                 uniform_buffer_memory, texture_image_memory;
 }
 
 void Cleanup_Swapchain ( ref VkContext ctx ) {
@@ -922,10 +923,96 @@ private:
                                  &vk_ctx.command_pool));
   }
 
+  void Create_Image(uint w, uint h, VkFormat format, VkImageTiling tiling,
+                  VkImageUsageFlags usage, VkMemoryPropertyFlags properties,
+                  ref VkImage image, ref VkDeviceMemory image_memory) {
+    // -- create image on device --
+    VkImageCreateInfo image_info;
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.extent.width = w;
+    image_info.extent.height = h;
+    image_info.extent.depth = 1;
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.format = format;
+    image_info.tiling = tiling;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    image_info.usage = usage;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.flags = 0;
+    enforceVK(vkCreateImage(vk_ctx.device, &image_info, null, &image));
+    // -- get memory requirements for image --
+    VkMemoryRequirements mem_req;
+    vkGetImageMemoryRequirements(vk_ctx.device, image, &mem_req);
+    // -- allocate memory on device for texture image --
+    VkMemoryAllocateInfo alloc_info;
+    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = mem_req.size;
+    alloc_info.memoryTypeIndex = Find_Memory_Type(mem_req.memoryTypeBits,
+                                          properties);
+    enforceVK(vkAllocateMemory(vk_ctx.device, &alloc_info, null,
+                              &image_memory));
+    // bind memory to buffer
+    vkBindImageMemory(vk_ctx.device, image, image_memory, 0);
+  }
+
   void Setup_Texture_Image ( ) {
+    // load image to host
     import imageformats;
-    int width, height, channels;
-    read_image_info("textures/Texture.png", width, height, channels);
+    auto img = read_image("textures/Texture.png");
+    // create staging buffer
+    VkBuffer staging_buffer;
+    VkDeviceMemory staging_buffer_memory;
+    auto len = img.pixels.length;
+    Create_Buffer(len, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        staging_buffer, staging_buffer_memory);
+    // copy image to staging buffer
+    void* data;
+    vkMapMemory(vk_ctx.device, staging_buffer_memory, 0, len, 0, &data);
+      memcpy(data, img.pixels.ptr, len);
+    vkUnmapMemory(vk_ctx.device, staging_buffer_memory);
+    // -- move staging buffer to image --
+    Create_Image(img.w, img.h, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_IMAGE_TILING_OPTIMAL,
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                 vk_ctx.texture_image, vk_ctx.texture_image_memory);
+  }
+
+  VkCommandBuffer Begin_Single_Time_Commands ( ) {
+    // -- allocate command buffer --
+    VkCommandBufferAllocateInfo alloc_info;
+    alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc_info.commandPool = vk_ctx.command_pool;
+    alloc_info.commandBufferCount = 1;
+    VkCommandBuffer command_buffer;
+    enforceVK(vkAllocateCommandBuffers(vk_ctx.device, &alloc_info,
+                                      &command_buffer));
+    // -- begin command buffer --
+    VkCommandBufferBeginInfo begin_info;
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(command_buffer, &begin_info);
+    return command_buffer;
+  }
+
+  void End_Single_Time_Commands(VkCommandBuffer command_buffer) {
+    vkEndCommandBuffer(command_buffer);
+    // -- submit info --
+    VkSubmitInfo submit_info;
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+    vkQueueSubmit(vk_ctx.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(vk_ctx.graphics_queue);
+    // free command
+    vkFreeCommandBuffers(vk_ctx.device, vk_ctx.command_pool, -1,
+                         &command_buffer);
   }
 
   void Setup_Command_Buffers() {
@@ -1085,36 +1172,36 @@ private:
   }
 
   void Copy_Buffer ( VkBuffer src_buf, VkBuffer dst_buf, VkDeviceSize size ) {
-    // -- construct command buffer for copy --
-    VkCommandBufferAllocateInfo alloc_info;
-    alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    alloc_info.commandPool = vk_ctx.command_pool;
-    alloc_info.commandBufferCount = 1;
-    // -- allocate command buffer --
-    VkCommandBuffer command_buffer;
-    vkAllocateCommandBuffers(vk_ctx.device, &alloc_info, &command_buffer);
-    // -- start recording command buffer --
-    VkCommandBufferBeginInfo begin_info;
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(command_buffer, &begin_info);
-      // -- copy information --
+    VkCommandBuffer command_buffer = Begin_Single_Time_Commands();
       VkBufferCopy copy_region;
       copy_region.srcOffset = copy_region.dstOffset = 0;
       copy_region.size = size;
       vkCmdCopyBuffer(command_buffer, src_buf, dst_buf, 1, &copy_region);
-    vkEndCommandBuffer(command_buffer);
-    // -- execute command buffer --
-    VkSubmitInfo submit_info;
-    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &command_buffer;
-    vkQueueSubmit(vk_ctx.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
-    vkQueueWaitIdle(vk_ctx.graphics_queue);
-    // -- free memory --
-    vkFreeCommandBuffers(vk_ctx.device, vk_ctx.command_pool, 1,
-                        &command_buffer);
+    End_Single_Time_Commands(command_buffer);
+  }
+
+  void Transition_Image_Layout(VkImage image, VkFormat format,
+                        VkImageLayout old_layout, VkImageLayout new_layout) {
+    VkCommandBuffer command_buffer = Begin_Single_Time_Commands();
+
+    VkImageMemoryBarrier barrier;
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = old_layout;
+    barrier.newLayout = new_layout;
+    barrier.image = image;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = 0;
+    vkCmdPipelineBarrier(command_buffer, 0, 0, 0, 0, null, 0, null, 1,
+                           &barrier);
+
+    End_Single_Time_Commands(command_buffer);
   }
 
   void Setup_Descriptor_Set_Layout ( ) {
@@ -1258,7 +1345,6 @@ private:
         // FIX V
         ubo.proj = Perspective(radians(95.0f), vk_ctx.swapchain.extent.width / cast(float)vk_ctx.swapchain.extent.height, 0.1f, 10.0f);
         // ubo.proj = float4x4.orthographic(-1.0f, 1.0f, 1.0f, -1.0f, -1.1f, 15.0f);
-        writeln(ubo.proj*ubo.model*ubo.view*float4(-0.5f, -0.5f, 0.0f, 1.0f));
     // -- copy memory over --
     void* data;
     vkMapMemory(vk_ctx.device, vk_ctx.uniform_buffer_memory, 0, ubo.sizeof,

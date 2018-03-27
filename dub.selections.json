@@ -1,0 +1,14 @@
+{
+	"fileVersion": 1,
+	"versions": {
+		"derelict-glfw3": "3.1.3",
+		"derelict-util": "2.0.6",
+		"erupted": "1.7.2",
+		"gfm": "7.0.0",
+		"gl3n": "1.3.1",
+		"imageformats": "6.1.2",
+		"wayland": "0.1.0",
+		"xcb-d": "2.1.0+1.11.1",
+		"xlib-d": "0.1.1"
+	}
+}
