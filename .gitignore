@@ -1,0 +1,15 @@
+.dub
+docs.json
+__dummy.html
+docs/
+gl-playground.so
+gl-playground.dylib
+gl-playground.dll
+gl-playground.a
+gl-playground.lib
+gl-playground-test-*
+gl-playground
+*.exe
+*.o
+*.obj
+*.lst
