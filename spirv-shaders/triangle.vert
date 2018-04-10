@@ -15,9 +15,11 @@ layout(binding = 0) uniform UniformBufferObject {
 //--- in ---
 layout(location = 0) in vec2 in_vertex;
 layout(location = 1) in vec3 in_colour;
+layout(location = 2) in vec2 in_tex_coord;
 
 //--- out ---
 layout(location = 0) out vec3 frag_colour;
+layout(location = 1) out vec2 frag_tex_coord;
 
 //--- functions/entry ---
 void main() {
@@ -25,4 +27,5 @@ void main() {
   gl_Position.z = (gl_Position.z + gl_Position.w)/2.0f;
   gl_Position.y = -gl_Position.y;
   frag_colour = in_colour;
+  frag_tex_coord = in_tex_coord;
 }

@@ -297,6 +297,7 @@ struct VkContext {
   VkBuffer vertex_buffer, index_buffer, uniform_buffer;
   VkImage texture_image;
   VkImageView texture_image_view;
+  VkSampler texture_sampler;
   VkDeviceMemory vertex_buffer_memory, index_buffer_memory,
                  uniform_buffer_memory, texture_image_memory;
 }
@@ -327,9 +328,13 @@ void Cleanup ( ref VkContext ctx ) {
   vkDestroySemaphore(ctx.device, ctx.image_available_semaphore, null);
   vkDestroySemaphore(ctx.device, ctx.render_finished_semaphore, null);
   ctx.Cleanup_Swapchain;
-  writeln("Destroying texture image");
+  writeln("Destroying sampler");
+  vkDestroySampler(ctx.device, ctx.texture_sampler, null);
+  writeln("Destroying texture image + memory");
   vkDestroyImage(ctx.device, ctx.texture_image, null);
   vkFreeMemory(ctx.device, ctx.texture_image_memory, null);
+  writeln("Destroying image view");
+  vkDestroyImageView(ctx.device, ctx.texture_image_view, null);
   writeln("Destroying descriptor pool");
   vkDestroyDescriptorPool(ctx.device, ctx.descriptor_pool, null);
   writeln("Destroying descriptor set layouts");
@@ -361,6 +366,7 @@ void Cleanup ( ref VkContext ctx ) {
 struct Vertex {
   float2 origin;
   float3 colour;
+  float2 tex_coord;
 
   /**
     Returns a binding description for this vertex struct. Describing at which
@@ -378,16 +384,23 @@ struct Vertex {
     Returns a attribute description for this vertex struct, describing how
       to extract attribute information from the struct
   **/
-  static VkVertexInputAttributeDescription[2] RAttribution_Description () {
-    VkVertexInputAttributeDescription[2] attribute_descriptions;
+  static VkVertexInputAttributeDescription[3] RAttribution_Description () {
+    VkVertexInputAttributeDescription[3] attribute_descriptions;
+    // origin
     attribute_descriptions[0].binding = 0;
     attribute_descriptions[0].location = 0;
     attribute_descriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
     attribute_descriptions[0].offset = Vertex.origin.offsetof;
+    // colour
     attribute_descriptions[1].binding = 0;
     attribute_descriptions[1].location = 1;
     attribute_descriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
     attribute_descriptions[1].offset = Vertex.colour.offsetof;
+    // UV coordinates
+    attribute_descriptions[2].binding = 0;
+    attribute_descriptions[2].location = 2;
+    attribute_descriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+    attribute_descriptions[2].offset = Vertex.tex_coord.offsetof;
     return attribute_descriptions;
   }
 }
@@ -410,10 +423,10 @@ private:
   VkContext vk_ctx;
 
   immutable Vertex[] vertices = [
-    {float2(-0.5f, -0.5f), float3(1f, 0f, 0f)},
-    {float2( 0.5f, -0.5f), float3(0f, 1f, 0f)},
-    {float2( 0.5f,  0.5f), float3(0f, 0f, 1f)},
-    {float2(-0.5f,  0.5f), float3(0.5f, 0f, 1f)},
+    {float2(-0.5f, -0.5f), float3(1f,   0f, 0f), float2(1.0f, 0.0f)},
+    {float2( 0.5f, -0.5f), float3(0f,   1f, 0f), float2(0.0f, 0.0f)},
+    {float2( 0.5f, 0.5f),  float3(0f,   0f, 1f), float2(0.0f, 1.0f)},
+    {float2(-0.5f, 0.5f),  float3(0.5f, 0f, 1f), float2(1.0f, 1.0f)},
   ];
   immutable ushort[] indices = [
     0, 1, 2, 2, 3, 0
@@ -547,20 +560,24 @@ private:
     Return: A QueueFamilyIndices struct that returns true on Is_Complete
               if the device is suitable for this application.
   **/
-  QueueFamilyIndices Is_Device_Suitable ( VkPhysicalDevice device ) {
+  QueueFamilyIndices Is_Device_Suitable ( VkPhysicalDevice phydevice ) {
     QueueFamilyIndices failure;
     failure.Init();
     // Check extension support
-    if ( !Check_Device_Extension_Support(device, Device_extensions) ) {
+    if ( !Check_Device_Extension_Support(phydevice, Device_extensions) ) {
       return failure;
     }
+    // Check device features
+    VkPhysicalDeviceFeatures supported_features;
+    vkGetPhysicalDeviceFeatures(phydevice, &supported_features);
+    if ( !supported_features.samplerAnisotropy ) return failure;
     // Check swap and chain
-    auto swapchain_support = SwapchainSupportDetails(device, vk_ctx.surface);
+    auto swapchain_support = SwapchainSupportDetails(phydevice, vk_ctx.surface);
     if ( !swapchain_support.Sufficient() ) return failure;
     // Get family properties of the GPU
-    auto device_properties = RPhysical_Device_Properties(device);
+    auto device_properties = RPhysical_Device_Properties(phydevice);
     // Check for a discrete GPU
-    return RQueue_Families(device);
+    return RQueue_Families(phydevice);
   }
 
   void Setup_Vk_Physical_Device ( ) {
@@ -600,6 +617,7 @@ private:
     }
     // Get device create info
     VkPhysicalDeviceFeatures features = VkPhysicalDeviceFeatures();
+    features.samplerAnisotropy = VK_TRUE;
     features.shaderClipDistance = VK_TRUE;
     features.sampleRateShading = VK_TRUE;
     VkDeviceCreateInfo create_info;
@@ -680,25 +698,9 @@ private:
     vk_ctx.swapchain.image_views.length = vk_ctx.swapchain.images.length;
     // Create views into the image
     foreach ( iter, img; vk_ctx.swapchain.images ) {
-      // -- create image view info --
-      VkImageViewCreateInfo create_info;
-      create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-      create_info.image = img;
-      create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-      create_info.format = vk_ctx.swapchain.image_format;
-      create_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-      create_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-      create_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-      create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-      // -- colour targets with no mipmapping or layers --
-      create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-      create_info.subresourceRange.baseMipLevel = 0;
-      create_info.subresourceRange.levelCount = 1;
-      create_info.subresourceRange.baseArrayLayer = 0;
-      create_info.subresourceRange.layerCount = 1;
-      // create image view
-      enforceVK(vkCreateImageView(vk_ctx.device, &create_info, null,
-                                  &vk_ctx.swapchain.image_views[iter]));
+      writeln("IMG: ", img);
+      vk_ctx.swapchain.image_views[iter] = Create_Image_View(img,
+                                   vk_ctx.swapchain.image_format);
     }
   }
 
@@ -1019,7 +1021,7 @@ private:
   VkImageView Create_Image_View(VkImage image, VkFormat format) {
     VkImageViewCreateInfo view_info;
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    view_info.image = vk_ctx.texture_image;
+    view_info.image = image;
     view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
     view_info.format = format;
     view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1035,8 +1037,32 @@ private:
 
   void Setup_Texture_Image_View ( ) {
     // -- setup image view create --
+    writeln("TEXTURE: ", vk_ctx.texture_image);
     vk_ctx.texture_image_view = Create_Image_View(vk_ctx.texture_image,
                                               VK_FORMAT_R8G8B8A8_UNORM);
+  }
+
+  void Setup_Texture_Sampler ( ) {
+    // -- setup sampler --
+    VkSamplerCreateInfo sampler_info;
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.anisotropyEnable = VK_TRUE;
+    sampler_info.maxAnisotropy = 16;
+    sampler_info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    sampler_info.unnormalizedCoordinates = VK_FALSE;
+    sampler_info.compareEnable = VK_FALSE;
+    sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sampler_info.mipLodBias = 0.0f;
+    sampler_info.minLod = 0.0f;
+    sampler_info.maxLod = 0.0f;
+    enforceVK(vkCreateSampler(vk_ctx.device, &sampler_info, null,
+                                       &vk_ctx.texture_sampler));
   }
 
   VkCommandBuffer Begin_Single_Time_Commands ( ) {
@@ -1282,18 +1308,27 @@ private:
   }
 
   void Setup_Descriptor_Set_Layout ( ) {
+    // -- setup sampler layout binding --
+    VkDescriptorSetLayoutBinding sampler_binding;
+    sampler_binding.binding = 1;
+    sampler_binding.descriptorCount = 1;
+    sampler_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sampler_binding.pImmutableSamplers = null;
+    sampler_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     // -- setup descriptor layout binding --
-    VkDescriptorSetLayoutBinding ubo_layout_binding;
-    ubo_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    ubo_layout_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    ubo_layout_binding.binding = 0;
-    ubo_layout_binding.descriptorCount = 1;
-    ubo_layout_binding.pImmutableSamplers = null;
+    VkDescriptorSetLayoutBinding ubo_binding;
+    ubo_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    ubo_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    ubo_binding.binding = 0;
+    ubo_binding.descriptorCount = 1;
+    ubo_binding.pImmutableSamplers = null;
+    // -- combine bindings into array --
+    VkDescriptorSetLayoutBinding[] bindings = [sampler_binding, ubo_binding];
     // -- create descriptor layout --
     VkDescriptorSetLayoutCreateInfo layout_info;
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = 1;
-    layout_info.pBindings = &ubo_layout_binding;
+    layout_info.bindingCount = cast(int)bindings.length;
+    layout_info.pBindings = bindings.ptr;
     enforceVK(vkCreateDescriptorSetLayout(vk_ctx.device, &layout_info, null,
                                          &vk_ctx.descriptor_set_layout));
   }
@@ -1310,14 +1345,18 @@ private:
 
   void Setup_Descriptor_Pool ( ) {
     // -- setup the size of descriptors for descriptor pool --
-    VkDescriptorPoolSize pool_size;
-    pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    pool_size.descriptorCount = 1;
+    VkDescriptorPoolSize[] pool_sizes; pool_sizes.length = 2;
+    // -- create uniform buffer pool --
+    pool_sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    pool_sizes[0].descriptorCount = 1;
+    // -- create combined image sampler pool --
+    pool_sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_sizes[1].descriptorCount = 1;
     // -- create descriptor pool --
     VkDescriptorPoolCreateInfo pool_info;
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.poolSizeCount = 1;
-    pool_info.pPoolSizes = &pool_size;
+    pool_info.poolSizeCount = cast(int)pool_sizes.length;
+    pool_info.pPoolSizes = pool_sizes.ptr;
     pool_info.maxSets = 1;
     pool_info.flags = 0; // optionally set it to be freed
     enforceVK(vkCreateDescriptorPool(vk_ctx.device, &pool_info, null,
@@ -1339,19 +1378,35 @@ private:
     buffer_info.buffer = vk_ctx.uniform_buffer;
     buffer_info.offset = 0;
     buffer_info.range = UniformBufferObject.sizeof;
+    // -- setup descriptor image to bind image and sampler --
+    VkDescriptorImageInfo image_info;
+    image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    image_info.imageView = vk_ctx.texture_image_view;
+    image_info.sampler = vk_ctx.texture_sampler;
     // -- setup descriptor buffer to be written to --
-    VkWriteDescriptorSet descriptor_write;
-    descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    descriptor_write.dstSet = vk_ctx.descriptor_set;
-    descriptor_write.dstBinding = 0;
-    descriptor_write.dstArrayElement = 0;
-    descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    descriptor_write.descriptorCount = 1;
-    descriptor_write.pBufferInfo = &buffer_info;
-    descriptor_write.pImageInfo = null;
-    descriptor_write.pTexelBufferView = null;
+    VkWriteDescriptorSet[] descriptor_writes; descriptor_writes.length = 2;
+    // -- setup uniform buffer descriptor write --
+    descriptor_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptor_writes[0].dstSet = vk_ctx.descriptor_set;
+    descriptor_writes[0].dstBinding = 0;
+    descriptor_writes[0].dstArrayElement = 0;
+    descriptor_writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    descriptor_writes[0].descriptorCount = 1;
+    descriptor_writes[0].pBufferInfo = &buffer_info;
+    descriptor_writes[0].pImageInfo = null;
+    descriptor_writes[0].pTexelBufferView = null;
+    // -- setup combined image sampler to be written to --
+    descriptor_writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptor_writes[1].dstSet = vk_ctx.descriptor_set;
+    descriptor_writes[1].dstBinding = 1;
+    descriptor_writes[1].dstArrayElement = 0;
+    descriptor_writes[1].descriptorType =
+                            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptor_writes[1].descriptorCount = 1;
+    descriptor_writes[1].pImageInfo = &image_info;
     // update descriptor write to the set
-    vkUpdateDescriptorSets(vk_ctx.device, 1, &descriptor_write, 0, null);
+    vkUpdateDescriptorSets(vk_ctx.device, cast(int)descriptor_writes.length,
+                           descriptor_writes.ptr, 0, null);
   }
 
   void Initialize_Vulkan ( ){
