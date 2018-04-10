@@ -296,6 +296,7 @@ struct VkContext {
 
   VkBuffer vertex_buffer, index_buffer, uniform_buffer;
   VkImage texture_image;
+  VkImageView texture_image_view;
   VkDeviceMemory vertex_buffer_memory, index_buffer_memory,
                  uniform_buffer_memory, texture_image_memory;
 }
@@ -326,6 +327,9 @@ void Cleanup ( ref VkContext ctx ) {
   vkDestroySemaphore(ctx.device, ctx.image_available_semaphore, null);
   vkDestroySemaphore(ctx.device, ctx.render_finished_semaphore, null);
   ctx.Cleanup_Swapchain;
+  writeln("Destroying texture image");
+  vkDestroyImage(ctx.device, ctx.texture_image, null);
+  vkFreeMemory(ctx.device, ctx.texture_image_memory, null);
   writeln("Destroying descriptor pool");
   vkDestroyDescriptorPool(ctx.device, ctx.descriptor_pool, null);
   writeln("Destroying descriptor set layouts");
@@ -958,6 +962,25 @@ private:
     vkBindImageMemory(vk_ctx.device, image, image_memory, 0);
   }
 
+  void Copy_Buffer_To_Image ( VkBuffer buffer, VkImage image, uint width,
+                              uint height ) {
+    VkCommandBuffer command_buffer = Begin_Single_Time_Commands();
+
+    VkBufferImageCopy region;
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = VkOffset3D(0, 0, 0);
+    region.imageExtent = VkExtent3D( width, height, 1);
+    vkCmdCopyBufferToImage(command_buffer, buffer, image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    End_Single_Time_Commands(command_buffer);
+  }
+
   void Setup_Texture_Image ( ) {
     // load image to host
     import imageformats;
@@ -981,6 +1004,39 @@ private:
                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                  vk_ctx.texture_image, vk_ctx.texture_image_memory);
+    // -- copy staging buffer to texture image --
+    Transition_Image_Layout(vk_ctx.texture_image, VK_FORMAT_R8G8B8A8_UNORM,
+           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    Copy_Buffer_To_Image(staging_buffer, vk_ctx.texture_image, img.w, img.h);
+    Transition_Image_Layout(vk_ctx.texture_image, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // -- cleanup
+    vkDestroyBuffer(vk_ctx.device, staging_buffer, null);
+    vkFreeMemory(vk_ctx.device, staging_buffer_memory, null);
+  }
+
+  VkImageView Create_Image_View(VkImage image, VkFormat format) {
+    VkImageViewCreateInfo view_info;
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = vk_ctx.texture_image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.baseMipLevel = 0;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.baseArrayLayer = 0;
+    view_info.subresourceRange.layerCount = 1;
+
+    VkImageView image_view;
+    enforceVK(vkCreateImageView(vk_ctx.device, &view_info, null, &image_view));
+    return image_view;
+  }
+
+  void Setup_Texture_Image_View ( ) {
+    // -- setup image view create --
+    vk_ctx.texture_image_view = Create_Image_View(vk_ctx.texture_image,
+                                              VK_FORMAT_R8G8B8A8_UNORM);
   }
 
   VkCommandBuffer Begin_Single_Time_Commands ( ) {
@@ -1011,7 +1067,7 @@ private:
     vkQueueSubmit(vk_ctx.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
     vkQueueWaitIdle(vk_ctx.graphics_queue);
     // free command
-    vkFreeCommandBuffers(vk_ctx.device, vk_ctx.command_pool, -1,
+    vkFreeCommandBuffers(vk_ctx.device, vk_ctx.command_pool, 1,
                          &command_buffer);
   }
 
@@ -1184,6 +1240,7 @@ private:
                         VkImageLayout old_layout, VkImageLayout new_layout) {
     VkCommandBuffer command_buffer = Begin_Single_Time_Commands();
 
+    // -- initialize memory barrier for pipeline
     VkImageMemoryBarrier barrier;
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.oldLayout = old_layout;
@@ -1196,10 +1253,30 @@ private:
     barrier.subresourceRange.levelCount = 1;
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = 0;
-    vkCmdPipelineBarrier(command_buffer, 0, 0, 0, 0, null, 0, null, 1,
-                           &barrier);
+    // -- pipeline src/dst mask
+    VkPipelineStageFlags source_stage;
+    VkPipelineStageFlags destination_stage;
+    if ( old_layout == VK_IMAGE_LAYOUT_UNDEFINED &&
+         new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ) {
+      // set destination mask :: top of pipe -> transfer
+      // transfer writes that don't need to wait
+      barrier.srcAccessMask = 0;
+      barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      source_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+      destination_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else if ( old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+                new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ) {
+      // set source mask :: transfer -> fragment
+      // shader reads should wait on transfer writes
+      barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+      source_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      destination_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    } else {
+      assert(false, "Unsupported layout transition");
+    }
+    vkCmdPipelineBarrier(command_buffer, source_stage, destination_stage,
+                         0, 0, null, 0, null, 1, &barrier);
 
     End_Single_Time_Commands(command_buffer);
   }
@@ -1294,6 +1371,7 @@ private:
     writeln("Setup_Framebuffers");          Setup_Framebuffers();
     writeln("Setup_Command_Pool");          Setup_Command_Pool();
     writeln("Setup Texture Image");         Setup_Texture_Image();
+    writeln("Setup Texture Image View");    Setup_Texture_Image_View();
     writeln("Setup_Vertex_Buffers");        Setup_Vertex_Buffers();
     writeln("Setup_Index_Buffers");         Setup_Index_Buffers();
     writeln("Setup_Uniform_Buffer");        Setup_Uniform_Buffer();
@@ -1359,7 +1437,7 @@ private:
              glfwGetKey(glfw_ctx.window, GLFW_KEY_ESCAPE) != GLFW_PRESS ) {
       glfwPollEvents();
       Update_Uniform_Buffer();
-      Draw_Frame();
+      // Draw_Frame();
       // writeln((glfwGetTime()-st)*1000, " MS");
       st=glfwGetTime();
       import core.thread;
