@@ -364,7 +364,7 @@ void Cleanup ( ref VkContext ctx ) {
 }
 
 struct Vertex {
-  float2 origin;
+  float3 origin;
   float3 colour;
   float2 tex_coord;
 
@@ -389,7 +389,7 @@ struct Vertex {
     // origin
     attribute_descriptions[0].binding = 0;
     attribute_descriptions[0].location = 0;
-    attribute_descriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+    attribute_descriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     attribute_descriptions[0].offset = Vertex.origin.offsetof;
     // colour
     attribute_descriptions[1].binding = 0;
@@ -423,13 +423,19 @@ private:
   VkContext vk_ctx;
 
   immutable Vertex[] vertices = [
-    {float2(-0.5f, -0.5f), float3(1f,   0f, 0f), float2(1.0f, 0.0f)},
-    {float2( 0.5f, -0.5f), float3(0f,   1f, 0f), float2(0.0f, 0.0f)},
-    {float2( 0.5f, 0.5f),  float3(0f,   0f, 1f), float2(0.0f, 1.0f)},
-    {float2(-0.5f, 0.5f),  float3(0.5f, 0f, 1f), float2(1.0f, 1.0f)},
+    {float3(-0.5f, -0.5f, 0.0f),  float3(1f, 0f, 0f), float2(1.0f, 0.0f)},
+    {float3( 0.5f, -0.5f, 0.0f),  float3(0f, 1f, 0f), float2(0.0f, 0.0f)},
+    {float3( 0.5f, 0.5f,  0.0f),  float3(0f, 0f, 1f), float2(0.0f, 1.0f)},
+    {float3(-0.5f, 0.5f,  0.0f),  float3(1f, 1f, 1f), float2(1.0f, 1.0f)},
+
+    {float3(-0.5f, -0.5f, -0.5f), float3(1f, 0f, 0f), float2(1.0f, 0.0f)},
+    {float3( 0.5f, -0.5f, -0.5f), float3(0f, 1f, 0f), float2(0.0f, 0.0f)},
+    {float3( 0.5f, 0.5f,  -0.5f), float3(0f, 0f, 1f), float2(0.0f, 1.0f)},
+    {float3(-0.5f, 0.5f,  -0.5f), float3(1f, 1f, 1f), float2(1.0f, 1.0f)},
   ];
   immutable ushort[] indices = [
-    0, 1, 2, 2, 3, 0
+    0, 1, 2, 2, 3, 0,
+    4, 5, 6, 6, 7, 4
   ];
 
   bool Vk_Has_All(string prop, Range)(const(char*)[] elem, Range vk) {
@@ -1308,22 +1314,22 @@ private:
   }
 
   void Setup_Descriptor_Set_Layout ( ) {
+    // -- setup descriptor layout binding --
+    VkDescriptorSetLayoutBinding ubo_binding;
+    ubo_binding.binding = 0;
+    ubo_binding.descriptorCount = 1;
+    ubo_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    ubo_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    ubo_binding.pImmutableSamplers = null;
     // -- setup sampler layout binding --
     VkDescriptorSetLayoutBinding sampler_binding;
     sampler_binding.binding = 1;
     sampler_binding.descriptorCount = 1;
     sampler_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sampler_binding.pImmutableSamplers = null;
     sampler_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    // -- setup descriptor layout binding --
-    VkDescriptorSetLayoutBinding ubo_binding;
-    ubo_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    ubo_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    ubo_binding.binding = 0;
-    ubo_binding.descriptorCount = 1;
-    ubo_binding.pImmutableSamplers = null;
+    sampler_binding.pImmutableSamplers = null;
     // -- combine bindings into array --
-    VkDescriptorSetLayoutBinding[] bindings = [sampler_binding, ubo_binding];
+    VkDescriptorSetLayoutBinding[] bindings = [ubo_binding, sampler_binding];
     // -- create descriptor layout --
     VkDescriptorSetLayoutCreateInfo layout_info;
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1393,8 +1399,6 @@ private:
     descriptor_writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     descriptor_writes[0].descriptorCount = 1;
     descriptor_writes[0].pBufferInfo = &buffer_info;
-    descriptor_writes[0].pImageInfo = null;
-    descriptor_writes[0].pTexelBufferView = null;
     // -- setup combined image sampler to be written to --
     descriptor_writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     descriptor_writes[1].dstSet = vk_ctx.descriptor_set;
@@ -1427,6 +1431,7 @@ private:
     writeln("Setup_Command_Pool");          Setup_Command_Pool();
     writeln("Setup Texture Image");         Setup_Texture_Image();
     writeln("Setup Texture Image View");    Setup_Texture_Image_View();
+    writeln("Setup Texture Sampler");       Setup_Texture_Sampler();
     writeln("Setup_Vertex_Buffers");        Setup_Vertex_Buffers();
     writeln("Setup_Index_Buffers");         Setup_Index_Buffers();
     writeln("Setup_Uniform_Buffer");        Setup_Uniform_Buffer();
@@ -1460,9 +1465,9 @@ private:
     float tan_half_fovy = tan(fovy/2.0f);
     float4x4 result = float4x4.identity();
     result[0][0] = 1.0f/(aspect*tan_half_fovy);
-    result[1][1] = 1.0f/(tan_half_fovy);
+    result[1][1] = 1.0f/(aspect*tan_half_fovy);
     result[2][2] = (zfar)/(znear - zfar);
-    result[2][3] = -1.0f;
+    result[2][3] = 1.0f;
     result[3][2] = -(zfar*znear)/(zfar-znear);
     return result;
   }
@@ -1473,11 +1478,12 @@ private:
     UniformBufferObject ubo;
     auto dim = cast(float)vk_ctx.swapchain.extent.width/
                cast(float)vk_ctx.swapchain.extent.height;
-        ubo.model = float4x4.rotation(time*radians(90.0f), float3(0f, 0f, 1f));
-        ubo.view = float4x4.look_at(float3(2.0f, 2.0f, 2.0f), float3(0.0f, 0.0f, 0.0f), float3(0.0f, 0.0f, 1.0f));
-        // FIX V
-        ubo.proj = Perspective(radians(95.0f), vk_ctx.swapchain.extent.width / cast(float)vk_ctx.swapchain.extent.height, 0.1f, 10.0f);
-        // ubo.proj = float4x4.orthographic(-1.0f, 1.0f, 1.0f, -1.0f, -1.1f, 15.0f);
+        ubo.model = float4x4.rotation(time*radians(40.0f), float3(0f, 0f, 1f));
+        ubo.view = float4x4.look_at(float3(1.0f, 0.0f, 1.0f),
+                            float3(0.0f, 0.0f, 0.0f), float3(0.0f, 0.0f, 1.0f));
+        ubo.proj = Perspective(radians(65.0f), vk_ctx.swapchain.extent.width /
+                                     cast(float)vk_ctx.swapchain.extent.height,
+                                     0.1f, 10.0f);
     // -- copy memory over --
     void* data;
     vkMapMemory(vk_ctx.device, vk_ctx.uniform_buffer_memory, 0, ubo.sizeof,
@@ -1492,7 +1498,7 @@ private:
              glfwGetKey(glfw_ctx.window, GLFW_KEY_ESCAPE) != GLFW_PRESS ) {
       glfwPollEvents();
       Update_Uniform_Buffer();
-      // Draw_Frame();
+      Draw_Frame();
       // writeln((glfwGetTime()-st)*1000, " MS");
       st=glfwGetTime();
       import core.thread;
