@@ -13,3 +13,4 @@ gl-playground
 *.o
 *.obj
 *.lst
+vulkan-playground
