@@ -2,6 +2,7 @@
 import std.stdio;
 import std.range;
 import std.array;
+import std.random;
 import std.algorithm : all, any;
 import std.exception;
 import std.conv;
@@ -426,27 +427,22 @@ private:
   GLFWContext glfw_ctx;
   VkContext vk_ctx;
 
-  immutable Vertex[] vertices = [
-    {float3(-0.5f, -0.5f, -0.5f),  float3(1f, 0f, 0f), float2(1.0f, 0.0f)},
-    {float3( 0.5f, -0.5f, -0.5f),  float3(0f, 1f, 0f), float2(0.0f, 0.0f)},
-    {float3( 0.5f, 0.5f,  -0.5f),  float3(0f, 0f, 1f), float2(0.0f, 1.0f)},
-    {float3(-0.5f, 0.5f,  -0.5f),  float3(1f, 1f, 1f), float2(1.0f, 1.0f)},
-
-    {float3(-0.3f, -0.3f, -0.40f), float3(1f, 0f, 0f), float2(1.0f, 0.0f)},
-    {float3( 0.7f, -0.3f, -0.40f), float3(0f, 1f, 0f), float2(0.0f, 0.0f)},
-    {float3( 0.7f, 0.7f, -0.40f), float3(0f, 0f, 1f), float2(0.0f, 1.0f)},
-    {float3(-0.3f, 0.7f, -0.40f), float3(1f, 1f, 1f), float2(1.0f, 1.0f)},
-  ];
-  immutable uint[] indices = [
-    0, 1, 2, 2, 3, 0,
-    4, 5, 6, 6, 7, 4
-  ];
-  // Vertex[] vertices;
-  // uint[] indices;
+  Vertex[] vertices;
+  uint[] indices;
 
   void Load_Model ( ) {
     import wavefront;
     WavefrontObj obj = new WavefrontObj("african.obj");
+    foreach ( vertex; obj.vertices ) {
+      Vertex vtx;
+      vtx.origin = vertex;
+      vtx.colour = float3(uniform(0.0f, 1.0f), 1f, 1f);
+      vtx.tex_coord = float2(0.0f, 0.0f);
+      vertices ~= vtx;
+    }
+    foreach ( index; obj.faces ) {
+      indices ~= cast(uint[])[index.x, index.y, index.z];
+    }
   }
 
   bool Vk_Has_All(string prop, Range)(const(char*)[] elem, Range vk) {
@@ -1368,6 +1364,17 @@ private:
     barrier.subresourceRange.levelCount = 1;
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
+    // -- set subresourcerange for barrier --
+    if ( new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ) {
+      // set depth/stencil properties
+      barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+      if ( Has_Stencil_Component(format)  )
+        barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    } else {
+      // set colour properties
+      barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+    // stencil/buffer
     // -- pipeline src/dst mask
     VkPipelineStageFlags source_stage;
     VkPipelineStageFlags destination_stage;
@@ -1578,9 +1585,10 @@ private:
       glfwGetInstanceProcAddress(null, "vkGetInstanceProcAddr"));
   }
 
+  // from GLM's Persective matrix. left handed side 0 to 1
   float4x4 Perspective(float fovy, float aspect, float znear, float zfar) {
     float tan_half_fovy = tan(fovy/2.0f);
-    float4x4 result = float4x4.identity;
+    float4x4 result = float4x4(0.0f);
     result[0][0] = 1.0f/(aspect*tan_half_fovy);
     result[1][1] = 1.0f/(tan_half_fovy);
     result[2][2] = (zfar+znear)/(zfar - znear);
@@ -1594,15 +1602,37 @@ private:
     )*result;
   }
 
+  // from GLM's Lookat matrix. left handed coordinate
+  float4x4 Look_At(float3 eye, float3 center, float3 up) {
+    float3 Front = (center-eye).normalized;
+    float3 Right = (cross(up, Front)).normalized;
+    float3 Up    = (cross(Front, Right).normalized);
+
+    float4x4 result = float4x4(1.0f);
+    result[0][0] = Right.x;
+    result[1][0] = Right.y;
+    result[2][0] = Right.z;
+    result[0][1] = Up.x;
+    result[1][1] = Up.y;
+    result[2][1] = Up.z;
+    result[0][2] = Front.x;
+    result[1][2] = Front.y;
+    result[2][2] = Front.z;
+    result[3][0] = -dot(Right, eye);
+    result[3][1] = -dot(Up, eye);
+    result[3][2] = -dot(Front, eye);
+    return result;
+  }
+
   void Update_Uniform_Buffer ( ) {
     float time = cast(float)glfwGetTime();
     // -- setup model/view/projection matrix --
     UniformBufferObject ubo;
     auto aspect = cast(float)vk_ctx.swapchain.extent.width/
                   cast(float)vk_ctx.swapchain.extent.height;
-    ubo.model = float4x4.identity.rotate(time*0.2f, float3(0.0f, 0.0f, 1.0f));
-    ubo.view = float4x4.look_at(float3(2.0f, 0.0f, 2.0f), float3(0.0f), float3(0.0f, 1f, 0f));
-    ubo.proj = Perspective(radians(90.0f), aspect, 0.1f, 10.0f);
+    ubo.model = float4x4.identity.rotate(time*0.6f, float3(0.0f, 1.0f, 0.0f));
+    ubo.view = Look_At(float3(4.0f, 0.0f, 4.0f), float3(0.0f), float3(0.0f, 1f, 0f));
+    ubo.proj = Perspective(radians(40.0f), aspect, 0.1f, 10.0f);
     // -- copy memory over --
     void* data;
     vkMapMemory(vk_ctx.device, vk_ctx.uniform_buffer_memory, 0, ubo.sizeof,
@@ -1618,7 +1648,7 @@ private:
       glfwPollEvents();
       Update_Uniform_Buffer();
       Draw_Frame();
-      // writeln((glfwGetTime()-st)*1000, " MS");
+      writeln((glfwGetTime()-st)*1000, " MS");
       st=glfwGetTime();
       import core.thread;
       import core.time;
